@@ -36,9 +36,9 @@ uint32_t            wxRequestTime               = 0;
 
 
 SmartBeaconValues   smartBeaconSettings[3] = {
-    {120,  3, 60, 15,  50, 20, 12, 60},     // Runner settings  = SLOW
-    {120,  5, 60, 40, 100, 12, 12, 60},     // Bike settings    = MEDIUM
-    {120, 10, 60, 70, 100, 12, 10, 80}      // Car settings     = FAST
+    { 60,  3, 45,  5,  50, 20, 12, 60},     // Runner settings  = SLOW
+    { 60,  4, 45, 10, 100, 12, 12, 60},     // Bike settings    = MEDIUM
+    { 60,  5, 45, 40, 100, 12, 10, 80}      // Car settings     = FAST
 };
 
 
