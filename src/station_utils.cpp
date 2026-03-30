@@ -16,12 +16,19 @@
  * along with LoRa APRS Tracker. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#ifdef UNIT_TEST
+#include "mock_esp_log.h"
+#else
 #include <esp_log.h>
+#endif
 static const char *TAG = "Station";
 
 #include <APRSPacketLib.h>
-#include <TinyGPS++.h>
+#include <NMEAGPS.h>
+#include "gps_utils.h"
+#ifndef UNIT_TEST
 #include <SPIFFS.h>
+#endif
 #include "telemetry_utils.h"
 #include "station_utils.h"
 #include "battery_utils.h"
@@ -42,7 +49,7 @@ static const char *TAG = "Station";
 
 extern Configuration        Config;
 extern Beacon               *currentBeacon;
-extern TinyGPSPlus          gps;
+extern gps_fix              gpsFix;
 extern uint8_t              myBeaconsIndex;
 extern uint8_t              loraIndex;
 extern uint8_t              screenBrightness;
@@ -129,7 +136,7 @@ namespace STATION_Utils {
     }
 
     // Douglas-Peucker algorithm: perpendicular distance from point to line segment
-    static float perpendicularDistance(float px, float py, float x1, float y1, float x2, float y2) {
+    float perpendicularDistance(float px, float py, float x1, float y1, float x2, float y2) {
         float dx = x2 - x1;
         float dy = y2 - y1;
 
@@ -155,7 +162,7 @@ namespace STATION_Utils {
     }
 
     // Douglas-Peucker simplification: reduce trace points while keeping shape
-    static void douglasPeuckerSimplify(TracePoint* trace, int start, int end, bool* keep, float epsilon) {
+    void douglasPeuckerSimplify(TracePoint* trace, int start, int end, bool* keep, float epsilon) {
         if (end <= start + 1) return;
 
         // Find point with max distance from line segment [start, end]
@@ -199,8 +206,8 @@ namespace STATION_Utils {
         keep[0] = true;
         keep[station->traceCount - 1] = true;
 
-        // Apply Douglas-Peucker with tolerance (0.0002° ≈ 22m)
-        douglasPeuckerSimplify(linear, 0, station->traceCount - 1, keep, 0.0002f);
+        // Apply Douglas-Peucker with tolerance (0.00008° ≈ 9m)
+        douglasPeuckerSimplify(linear, 0, station->traceCount - 1, keep, 0.00008f);
 
         // Rebuild trace with kept points only
         int newCount = 0;
@@ -424,12 +431,12 @@ namespace STATION_Utils {
         if (sendStartTelemetry && ((Config.battery.sendVoltage && Config.battery.voltageAsTelemetry) || (Config.telemetry.sendTelemetry && wxModuleFound)) && lastTxTime > 0) TELEMETRY_Utils::sendEquationsUnitsParameters();
 
         String path = Config.path;
-        if (gps.speed.kmph() > 200 || gps.altitude.meters() > 9000) path = ""; // avoid plane speed and altitude
+        if (gpsFix.speed_kph() > 200 || gpsFix.alt.whole > 9000) path = ""; // avoid plane speed and altitude
         String packet;
         if (miceActive) {
-            packet = APRSPacketLib::generateMiceGPSBeaconPacket(currentBeacon->micE, currentBeacon->callsign, currentBeacon->symbol, currentBeacon->overlay, path, gps.location.lat(), gps.location.lng(), gps.course.deg(), gps.speed.knots(), gps.altitude.meters());
+            packet = APRSPacketLib::generateMiceGPSBeaconPacket(currentBeacon->micE, currentBeacon->callsign, currentBeacon->symbol, currentBeacon->overlay, path, gpsFix.latitude(), gpsFix.longitude(), gpsFix.heading(), gpsSpeedKnots(), gpsFix.alt.whole);
         } else {
-            packet = APRSPacketLib::generateBase91GPSBeaconPacket(currentBeacon->callsign, "APLRT1", path, currentBeacon->overlay, APRSPacketLib::encodeGPSIntoBase91(gps.location.lat(),gps.location.lng(), gps.course.deg(), gps.speed.knots(), currentBeacon->symbol, Config.sendAltitude, gps.altitude.feet(), sendStandingUpdate));
+            packet = APRSPacketLib::generateBase91GPSBeaconPacket(currentBeacon->callsign, "APLRT1", path, currentBeacon->overlay, APRSPacketLib::encodeGPSIntoBase91(gpsFix.latitude(), gpsFix.longitude(), gpsFix.heading(), gpsSpeedKnots(), currentBeacon->symbol, Config.sendAltitude, gpsAltFeet(), sendStandingUpdate));
         }
 
         String batteryVoltage = BATTERY_Utils::getBatteryInfoVoltage();
@@ -506,8 +513,8 @@ namespace STATION_Utils {
         if (shouldSleepLowVoltage) POWER_Utils::shutdown();
         
         if (smartBeaconActive) {
-            lastTxLat       = gps.location.lat();
-            lastTxLng       = gps.location.lng();
+            lastTxLat       = gpsFix.latitude();
+            lastTxLng       = gpsFix.longitude();
             previousHeading = currentHeading;
             lastTxDistance  = 0.0;
 
@@ -515,7 +522,7 @@ namespace STATION_Utils {
             #ifdef USE_LVGL_UI
                 UIMapManager::addOwnTracePoint();
                 GPXWriter::addPoint(lastTxLat, lastTxLng,
-                                    gps.altitude.meters(), gps.hdop.hdop(), gps.speed.kmph());
+                                    gpsFix.alt.whole, gpsHdop(), gpsFix.speed_kph());
             #endif
         }
         lastTxTime  = millis();

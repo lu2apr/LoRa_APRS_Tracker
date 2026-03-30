@@ -37,13 +37,17 @@
              (donations : http://paypal.me/richonguzman)
 ____________________________________________________________________*/
 
+#ifdef UNIT_TEST
+#include "mock_esp_log.h"
+#else
 #include <esp_log.h>
+#endif
 static const char *TAG = "Main";
 
 #include <BluetoothSerial.h>
 #include <APRSPacketLib.h>
 #include <esp_task_wdt.h>
-#include <TinyGPS++.h>
+#include <NMEAGPS.h>
 #include <Arduino.h>
 #include <WiFi.h>
 #include "smartbeacon_utils.h"
@@ -82,7 +86,8 @@ String      versionDate             = "2026-01-12";
 String      versionNumber           = "2.4.1";
 Configuration                       Config;
 HardwareSerial                      gpsSerial(1);
-TinyGPSPlus                         gps;
+NMEAGPS                             nmeaGPS;
+gps_fix                             gpsFix;
 #ifdef HAS_BT_CLASSIC
     BluetoothSerial                 SerialBT;
 #endif
@@ -94,7 +99,6 @@ Beacon      *currentBeacon          = &Config.beacons[myBeaconsIndex];
 // Expose variables to UIMapManager namespace
 #ifdef USE_LVGL_UI
 namespace UIMapManager {
-    TinyGPSPlus& gps = ::gps;
     Configuration& Config = ::Config;
     uint8_t& myBeaconsIndex = ::myBeaconsIndex;
 }
@@ -179,10 +183,8 @@ void setup() {
     Config.init();                 // Now SPIFFS is ready, load or create config
     STORAGE_Utils::loadStats();
 
-    // Always start WiFi at boot — BLE is manual-only via Settings
-    #ifdef USE_LVGL_UI
-        LVGL_UI::updateInitStatus("WiFi...");
-    #endif
+    // WiFi/BLE: no auto-start at boot — manual activation only via Settings
+    // (first boot web-conf handled after LVGL init via needsWebConfig())
     WIFI_Utils::setup();
     MSG_Utils::loadNumMessages();
 
@@ -364,11 +366,19 @@ void loop() {
     lastTx = millis() - lastTxTime;
     if (gpsIsActive) {
         GPS_Utils::getData();
-        bool gps_time_update = gps.time.isUpdated();
-        bool gps_loc_update  = gps.location.isUpdated();
+        bool gps_time_update = GPS_Utils::hasNewFix() && gpsFix.valid.time;
+        bool gps_loc_update  = GPS_Utils::hasNewFix() && gpsFix.valid.location;
         GPS_Utils::setDateFromData();
 
-        int currentSpeed = (int) gps.speed.kmph();
+        // Keep SD Logger timestamps accurate with GPS wall-clock time
+        if (gps_time_update && gpsFix.valid.date) {
+            SD_Logger::setGpsTime(
+                gpsFix.dateTime.hours, gpsFix.dateTime.minutes, gpsFix.dateTime.seconds,
+                gpsFix.dateTime.date,  gpsFix.dateTime.month,   2000 + gpsFix.dateTime.year
+            );
+        }
+
+        int currentSpeed = gpsFix.valid.speed ? (int)gpsFix.speed_kph() : 0;
 
         if (gps_loc_update) Utils::checkStatus();
 
@@ -379,9 +389,17 @@ void loop() {
         }
         SMARTBEACON_Utils::checkFixedBeaconTime();
 
-        // Only send beacon if GPS has good quality fix
-        // Require: at least 6 satellites AND HDOP <= 5
-        bool gpsQualityOk = (gps.satellites.value() >= 6) && (gps.hdop.hdop() <= 5.0);
+        // Check if GPS quality meets criteria for sending a beacon
+        bool gpsQualityOk = false;
+        if (Config.gpsConfig.strict3DFix) {
+            // Strict Mountain Mode: Requires a very accurate 3D position to avoid sending wrong altitudes
+            // PDOP <= 5.0 ensures that both HDOP and VDOP are geometrically solid
+            gpsQualityOk = (gpsFix.satellites >= 6) && (gpsPdop() <= 5.0f);
+        } else {
+            // Normal Mode: Only cares about 2D horizontal accuracy (HDOP)
+            gpsQualityOk = (gpsFix.satellites >= 6) && (gpsHdop() <= 5.0f);
+        }
+
         if (sendUpdate && gps_loc_update && gpsQualityOk) {
             STATION_Utils::sendBeacon();
         } else if (sendUpdate && gps_loc_update && !gpsQualityOk) {
@@ -391,8 +409,13 @@ void loop() {
             gpsQualitySkipCount++;
             uint32_t now = millis();
             if (now - lastGpsQualityLogMs >= 30000) {
-                ESP_LOGD(TAG, "GPS quality too low (sats=%d, HDOP=%.1f), skipping beacon (x%u)",
-                         gps.satellites.value(), gps.hdop.hdop(), gpsQualitySkipCount);
+                if (Config.gpsConfig.strict3DFix) {
+                    ESP_LOGD(TAG, "GPS strict 3D quality too low (sats=%d, PDOP=%.1f), skipping beacon (x%u)",
+                             gpsFix.satellites, gpsPdop(), gpsQualitySkipCount);
+                } else {
+                    ESP_LOGD(TAG, "GPS quality too low (sats=%d, HDOP=%.1f), skipping beacon (x%u)",
+                             gpsFix.satellites, gpsHdop(), gpsQualitySkipCount);
+                }
                 lastGpsQualityLogMs = now;
                 gpsQualitySkipCount = 0;
             }
@@ -443,6 +466,15 @@ void loop() {
     if (millis() - lastHeartbeat >= 300000) {  // 5 minutes
         lastHeartbeat = millis();
         SD_Logger::logf(SD_Logger::INFO, "LOOP", "Heartbeat - Free heap: %u KB", ESP.getFreeHeap() / 1024);
+    }
+
+    // Update RTC crash context every 5s — readable at next boot after PANIC/WDT
+    static uint32_t lastCrashCtxUpdate = 0;
+    if (millis() - lastCrashCtxUpdate >= 5000) {
+        lastCrashCtxUpdate = millis();
+        float lat = gpsFix.valid.location ? (float)gpsFix.latitude() : 0.0f;
+        float lon = gpsFix.valid.location ? (float)gpsFix.longitude() : 0.0f;
+        SD_Logger::updateCrashContext("LOOP", lat, lon);
     }
 
     yield();

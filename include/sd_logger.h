@@ -20,6 +20,11 @@ namespace SD_Logger {
         CRITICAL
     };
 
+    // Set GPS wall-clock time (call once when GPS has a valid fix)
+    // Subsequent log entries will use HH:MM:SS UTC instead of raw uptime
+    void setGpsTime(uint8_t hour, uint8_t minute, uint8_t second,
+                    uint8_t day, uint8_t month, uint16_t year);
+
     // Log a message to SD card
     void log(LogLevel level, const char* module, const char* message);
     void logf(LogLevel level, const char* module, const char* format, ...);
@@ -41,6 +46,12 @@ namespace SD_Logger {
 
     // Clear old logs
     void clearLogs();
+
+    // Crash context — stored in RTC memory, survives panic/WDT reset
+    // Call updateCrashContext() periodically from key code paths.
+    // Call logPreviousCrashContext() at boot (before logBootInfo writes BOOT END).
+    void updateCrashContext(const char* module, float lat = 0.0f, float lon = 0.0f);
+    void logPreviousCrashContext();
 }
 
 #endif // SD_LOGGER_H_

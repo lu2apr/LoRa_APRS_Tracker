@@ -63,11 +63,9 @@ namespace WIFI_Utils {
     static bool wifiInitialized = false;
 
     void checkWiFi() {
-        // Initialize WiFiUserDisabled from config on first call
         if (!wifiInitialized) {
-            WiFiUserDisabled = !Config.wifiEnabled;
             wifiInitialized = true;
-            ESP_LOGI(TAG, "Initialized from config: %s", Config.wifiEnabled ? "enabled" : "disabled");
+            ESP_LOGI(TAG, "Initialized from config: %s", WiFiUserDisabled ? "disabled" : "enabled");
         }
 
         // User disabled WiFi manually - do nothing
@@ -278,12 +276,11 @@ namespace WIFI_Utils {
 
     bool needsWebConfig() {
         // Check with bounds safety - if vectors are empty, we need web config
-        if (Config.beacons.size() == 0 || Config.wifiAPs.size() == 0) {
+        if (Config.beacons.size() == 0) {
             return true;
         }
         return (Config.wifiAutoAP.active ||
-                Config.beacons[0].callsign == "NOCALL-7" ||
-                Config.wifiAPs[0].ssid == "");
+                Config.beacons[0].callsign == "NOCALL-7");
     }
 
     void setup() {
@@ -291,19 +288,16 @@ namespace WIFI_Utils {
         // Modem sleep (WIFI_PS_MIN_MODEM) is enabled after connection
 
         #ifdef USE_LVGL_UI
-            // For LVGL, let main handle web-conf after LVGL init
-            if (Config.wifiEnabled && !needsWebConfig()) {
-                startStationMode();
-            }
-            WiFiUserDisabled = !Config.wifiEnabled;
-            // If needsWebConfig(), main will display the LVGL web-conf screen
+            // WiFi no longer starts at boot — manual activation only via Settings.
+            // First boot web-conf (NOCALL/no WiFi) is handled by main after LVGL init.
+            WiFiUserDisabled = true;
         #else
             // Blocking web-conf mode if enabled, callsign NOCALL, or no WiFi network configured
             if (needsWebConfig()) {
                 startBlockingWebConfig();
                 // Never returns here - reboot after config
             }
-            // Mode Station: connexion au réseau WiFi configuré (si activé)
+            // Station Mode: connect to the configured WiFi network (if enabled)
             WiFiUserDisabled = !Config.wifiEnabled;
             if (Config.wifiEnabled) {
                 startStationMode();

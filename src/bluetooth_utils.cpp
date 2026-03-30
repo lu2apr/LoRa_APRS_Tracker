@@ -16,10 +16,14 @@
  * along with LoRa APRS Tracker. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#ifdef UNIT_TEST
+#include "mock_esp_log.h"
+#else
 #include <esp_log.h>
+#endif
 static const char *TAG = "Bluetooth";
 
-#include <TinyGPS++.h>
+#include <NMEAGPS.h>
 #include <esp_bt.h>
 #include "bluetooth_utils.h"
 #include "configuration.h"
@@ -29,7 +33,8 @@ static const char *TAG = "Bluetooth";
 extern Configuration    Config;
 extern Beacon           *currentBeacon;
 extern BluetoothSerial  SerialBT;
-extern TinyGPSPlus      gps;
+extern NMEAGPS          nmeaGPS;
+extern gps_fix          gpsFix;
 extern bool             bluetoothConnected;
 extern bool             bluetoothActive;
 
@@ -88,7 +93,10 @@ namespace BLUETOOTH_Utils {
         for (int i = 0; i < size; i++) {
             char c = (char) buffer[i];
             if (isNmea) {
-                gps.encode(c);
+                nmeaGPS.handle(c);
+                if (nmeaGPS.available()) {
+                    gpsFix = nmeaGPS.read();
+                }
             } else {
                 serialReceived += c;
             }

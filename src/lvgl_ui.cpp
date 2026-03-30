@@ -11,12 +11,14 @@ static const char *TAG = "LVGL";
 #include <Arduino.h>
 #include <FS.h>
 #include "LGFX_TDeck.h"
-#include <TinyGPS++.h>
+#include <NMEAGPS.h>
+#include "gps_utils.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <lvgl.h>
 #define TOUCH_MODULES_GT911
 #include "battery_utils.h"
+#include "display.h"
 #include "ble_utils.h"
 #include "board_pinout.h"
 #include "configuration.h"
@@ -79,7 +81,7 @@ const uint8_t *const *symbolsAPRS = ::symbolsAPRS;
 extern Configuration Config;
 extern uint8_t myBeaconsIndex;
 extern int myBeaconsSize;
-extern TinyGPSPlus gps;
+extern gps_fix gpsFix;
 extern bool WiFiConnected;
 extern bool WiFiEcoMode;
 extern bool WiFiUserDisabled;
@@ -176,16 +178,20 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     lastActivityTime = millis();
 
     // Wake up screen if dimmed
+    // Always reassert backlight on touch — guards against LEDC channel loss
+    // (GPIO 42 shared between LovyanGFX Light_PWM and Arduino analogWrite)
+    displaySetBrightness(screenBrightness);
+    
     if (screenDimmed) {
       screenDimmed = false;
-#ifdef BOARD_BL_PIN
-      analogWrite(BOARD_BL_PIN, screenBrightness);
-#endif
+
       // Boost CPU to 240 MHz if on map screen
-      if (lv_scr_act() == UIMapManager::screen_map) {
+      if (lv_scr_act() == MapState::screen_map) {
         setCpuFrequencyMhz(240);
         ESP_LOGI(TAG, "Screen woken up, CPU boosted to %d MHz (map)",
                       getCpuFrequencyMhz());
+        // Force immediate map redraw centered on current GPS position
+        UIMapManager::redraw_map_canvas();
       } else {
         ESP_LOGI(TAG, "Screen woken up by touch");
       }
@@ -269,9 +275,7 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
     tft.fillScreen(TFT_BLACK); // Clear to black before showing anything
 
 // Now turn on backlight with saved brightness
-#ifdef BOARD_BL_PIN
-    analogWrite(BOARD_BL_PIN, screenBrightness);
-#endif
+  displaySetBrightness(screenBrightness);
 
     // Initialize LVGL if not already done
     if (!lvgl_display_initialized) {
@@ -454,10 +458,7 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
     // Only initialize display if not already done by splash screen
     if (!lvgl_display_initialized) {
 // Set backlight with saved brightness
-#ifdef BOARD_BL_PIN
-      pinMode(BOARD_BL_PIN, OUTPUT);
-      analogWrite(BOARD_BL_PIN, screenBrightness);
-#endif
+      displaySetBrightness(screenBrightness);
 
       // Re-init TFT for LVGL
       tft.init();
@@ -584,11 +585,9 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
           Config.display.timeout * 1000; // Config is in seconds
       if (currentTime - lastActivityTime >= ecoTimeoutMs) {
         screenDimmed = true;
-#ifdef BOARD_BL_PIN
-        analogWrite(BOARD_BL_PIN, 0); // Turn off backlight
-#endif
+        tft.setBrightness(0); // Turn off backlight
         // Reduce CPU to 80 MHz if on map screen
-        if (lv_scr_act() == UIMapManager::screen_map) {
+        if (lv_scr_act() == MapState::screen_map) {
           setCpuFrequencyMhz(80);
           ESP_LOGI(TAG,
               "Screen dimmed (eco mode), CPU reduced to %d MHz (map)",
@@ -615,15 +614,15 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
       }
 
       // Update GPS data
-      if (gps.location.isValid()) {
-        UIDashboard::updateGPS(gps.location.lat(), gps.location.lng(), gps.altitude.meters(),
-                  gps.speed.kmph(), gps.satellites.value(), gps.hdop.hdop());
+      if (gpsFix.valid.location) {
+        UIDashboard::updateGPS(gpsFix.latitude(), gpsFix.longitude(), gpsFix.alt.whole,
+                  gpsFix.speed_kph(), gpsFix.satellites, gpsHdop());
       }
 
       // Update date/time from GPS
-      if (gps.time.isValid() && gps.date.isValid()) {
-        UIDashboard::updateTime(gps.date.day(), gps.date.month(), gps.date.year(),
-                   gps.time.hour(), gps.time.minute(), gps.time.second());
+      if (gpsFix.valid.time && gpsFix.valid.date) {
+        UIDashboard::updateTime(gpsFix.dateTime.date, gpsFix.dateTime.month, 2000 + gpsFix.dateTime.year,
+                   gpsFix.dateTime.hours, gpsFix.dateTime.minutes, gpsFix.dateTime.seconds);
       }
 
       // Update battery

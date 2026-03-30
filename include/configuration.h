@@ -21,7 +21,9 @@
 
 #include <Arduino.h>
 #include <vector>
+#ifndef UNIT_TEST
 #include <FS.h>
+#endif
 
 class WiFi_AP {
 public:
@@ -56,6 +58,11 @@ public:
     bool    ecoMode;
     int     timeout;
     bool    turn180;
+};
+
+class GPSConfig {
+public:
+    bool    strict3DFix; // Global setting for PDOP filtering
 };
 
 class Battery {
@@ -152,6 +159,7 @@ public:
     Battery                 battery;
     Winlink                 winlink;
     Telemetry               telemetry;
+    GPSConfig               gpsConfig;
     Notification            notification;
     std::vector<LoraType>   loraTypes;
     Lora                    lora;

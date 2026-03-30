@@ -20,7 +20,8 @@
 #include <APRSPacketLib.h>
 
 static const char *TAG = "Keyboard";
-#include <TinyGPS++.h>
+#include <NMEAGPS.h>
+#include "gps_utils.h"
 #include <Wire.h>
 #include "keyboard_utils.h"
 #include "winlink_utils.h"
@@ -40,7 +41,7 @@ static const char *TAG = "Keyboard";
 
 extern Configuration    Config;
 extern Beacon           *currentBeacon;
-extern TinyGPSPlus      gps;
+extern gps_fix          gpsFix;
 extern bool             sendUpdate;
 extern int              menuDisplay;
 extern uint32_t         menuTime;
@@ -90,8 +91,6 @@ bool        showHumanHeading        = false;
 
 // Caps Lock detection via BBQ10 status register
 static bool         capsLockActive      = false;
-static bool         lastShiftState      = false;
-static uint32_t     lastShiftPressTime  = 0;
 static const uint32_t DOUBLE_TAP_MS     = 400;
 
 // BBQ10 Keyboard Registers
@@ -460,9 +459,7 @@ namespace KEYBOARD_Utils {
                     #endif
                     break;
             }
-            #ifdef HAS_TFT
-                analogWrite(TFT_BL, screenBrightness);
-            #endif
+            displaySetBrightness(screenBrightness);
             displayShow("  SCREEN", "", "SCREEN BRIGHTNESS " + MENU_Utils::screenBrightnessAsString(screenBrightness), 1000);
             STATION_Utils::saveIndex(2, screenBrightness);
             #ifdef HAS_JOYSTICK
@@ -627,15 +624,13 @@ namespace KEYBOARD_Utils {
     void processPressedKey(char key) {
         keyDetected = true;
         menuTime = millis();
-
-        // Reset LVGL eco mode activity timer and wake screen if dimmed
+        
+        // Reset LVGL eco mode activity timer and reassert backlight on keypress
         #ifdef USE_LVGL_UI
             lastActivityTime = millis();
+            displaySetBrightness(screenBrightness);
             if (screenDimmed) {
                 screenDimmed = false;
-                #ifdef BOARD_BL_PIN
-                    analogWrite(BOARD_BL_PIN, screenBrightness);
-                #endif
             }
             LVGL_UI::handleComposeKeyboard(key);
         #endif
@@ -834,7 +829,7 @@ namespace KEYBOARD_Utils {
             } else if (key == 13 && messageText.length() > 0) {
                 messageText.trim();
                 if (messageText.length() > 67) messageText = messageText.substring(0, 67);
-                String packet = APRSPacketLib::generateBase91GPSBeaconPacket(currentBeacon->callsign, "APLRT1", Config.path, currentBeacon->overlay, APRSPacketLib::encodeGPSIntoBase91(gps.location.lat(),gps.location.lng(), gps.course.deg(), gps.speed.knots(), currentBeacon->symbol, Config.sendAltitude, gps.altitude.feet(), sendStandingUpdate));
+                String packet = APRSPacketLib::generateBase91GPSBeaconPacket(currentBeacon->callsign, "APLRT1", Config.path, currentBeacon->overlay, APRSPacketLib::encodeGPSIntoBase91(gpsFix.latitude(), gpsFix.longitude(), gpsFix.heading(), gpsSpeedKnots(), currentBeacon->symbol, Config.sendAltitude, gpsAltFeet(), sendStandingUpdate));
                 packet += messageText;
                 displayShow("<<< TX >>>", "", packet,100);
                 LoRa_Utils::sendNewPacket(packet);       
@@ -857,24 +852,6 @@ namespace KEYBOARD_Utils {
         else if (key == 183) {  // Arrow Right
             rightArrow();
         }
-    }
-
-    // Read BBQ10 key status register for modifier state
-    static uint8_t readKeyStatus() {
-        Wire.beginTransmission(keyboardAddress);
-        Wire.write(REG_KEY_STATUS);
-        Wire.endTransmission();
-        Wire.requestFrom(keyboardAddress, static_cast<uint8_t>(1));
-        if (Wire.available()) {
-            return Wire.read();
-        }
-        return 0;
-    }
-
-    // Check if Shift is currently pressed (bit 0 of key status)
-    static bool isShiftPressed() {
-        uint8_t status = readKeyStatus();
-        return (status & 0x01) != 0;  // Bit 0 = Shift modifier
     }
 
     bool isCapsLockActive() {

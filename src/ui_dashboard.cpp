@@ -70,6 +70,7 @@ static lv_color_t *aprs_symbol_buf = nullptr;
 static lv_obj_t *label_last_rx = nullptr;
 
 // Status bar icons
+static lv_obj_t *icon_gps_strict = nullptr;
 static lv_obj_t *icon_wifi = nullptr;
 static lv_obj_t *icon_bluetooth = nullptr;
 static lv_obj_t *icon_battery = nullptr;
@@ -168,10 +169,10 @@ static void btn_map_clicked(lv_event_t *e) {
     UIPopups::showMapLoading();
 
     // Recreate map screen each time to update positions
-    if (UIMapManager::screen_map) {
+    if (MapState::screen_map) {
         ESP_LOGD(TAG, "Deleting old screen_map");
-        lv_obj_del(UIMapManager::screen_map);
-        UIMapManager::screen_map = nullptr;
+        lv_obj_del(MapState::screen_map);
+        MapState::screen_map = nullptr;
     }
     ESP_LOGD(TAG, "Creating new map screen");
     UIMapManager::create_map_screen();
@@ -180,7 +181,7 @@ static void btn_map_clicked(lv_event_t *e) {
     // Hide loading popup now that map is ready
     UIPopups::hideMapLoading();
 
-    lv_scr_load_anim(UIMapManager::screen_map, LV_SCR_LOAD_ANIM_MOVE_LEFT, 100, 0, false);
+    lv_scr_load_anim(MapState::screen_map, LV_SCR_LOAD_ANIM_MOVE_LEFT, 100, 0, false);
     ESP_LOGD(TAG, "btn_map_clicked DONE");
 }
 
@@ -232,6 +233,12 @@ void createDashboard() {
     lv_label_set_text(label_time, "--/-- --:--");
     lv_obj_set_style_text_color(label_time, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(label_time, &lv_font_montserrat_14, 0);
+
+    // GPS Strict 3D icon (hidden by default, shown when active)
+    icon_gps_strict = lv_label_create(status_bar);
+    lv_label_set_text(icon_gps_strict, LV_SYMBOL_GPS " 3D");
+    lv_obj_set_style_text_color(icon_gps_strict, lv_color_hex(0xffd700), 0); // Gold/Yellow
+    if (!Config.gpsConfig.strict3DFix) lv_obj_add_flag(icon_gps_strict, LV_OBJ_FLAG_HIDDEN);
 
     // WiFi icon (hidden by default, shown when connected)
     icon_wifi = lv_label_create(status_bar);
@@ -442,9 +449,19 @@ void updateLastRx() {
         text += line;
     }
     lv_label_set_text(label_last_rx, text.c_str());
-}
+    }
 
-void updateWiFi(bool connected, int rssi) {
+    void updateGPSStrictIcon() {
+    if (icon_gps_strict) {
+        if (Config.gpsConfig.strict3DFix) {
+            lv_obj_clear_flag(icon_gps_strict, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(icon_gps_strict, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    }
+
+    void updateWiFi(bool connected, int rssi) {
     if (icon_wifi) {
         // Show icon only if WiFi is connected
         if (connected && !WiFiUserDisabled && !WiFiEcoMode) {
