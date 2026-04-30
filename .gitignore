@@ -26,7 +26,6 @@ update_version.sh
 # Docs local only
 docs/*.txt
 docs/*.log
-docs/*.html
 docs/*.kate-swp
 docs/restored_files/
 docs/restored_prompts/
