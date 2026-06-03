@@ -10,7 +10,11 @@ static const char *TAG = "LVGL";
 #include <APRSPacketLib.h>
 #include <Arduino.h>
 #include <FS.h>
+#if defined(CROWPANEL_ADVANCE_35)
+#include "LGFX_CrowPanel_35.h"
+#else
 #include "LGFX_TDeck.h"
+#endif
 #include <NMEAGPS.h>
 #include "gps_utils.h"
 #include <WiFi.h>
@@ -35,7 +39,7 @@ static const char *TAG = "LVGL";
 #include "utils.h"
 #include "wifi_utils.h"
 #include <SD.h> // Added because used for sent messages
-#include <TouchLib.h>
+// Touch handled natively by LovyanGFX (GT911 in LGFX classes)
 #include <Wire.h>
 #include <algorithm> // For std::sort
 #include <freertos/FreeRTOS.h>
@@ -48,28 +52,13 @@ static const char *TAG = "LVGL";
 #include "ui_dashboard.h"    // Dashboard screen module
 #include "ui_messaging.h"    // Messaging screens module
 
-SemaphoreHandle_t spiMutex = NULL;
+// Symbols shared with non-LVGL builds (defined in shared_symbols.cpp)
+extern SemaphoreHandle_t spiMutex;
+extern const char *symbolArray[];
+extern const int symbolArraySize;
+extern const uint8_t *symbolsAPRS[];
 
-// APRS symbol mapping (defined once here for extern declarations in
-// custom_characters.h)
-const char *symbolArray[] = {"[", ">", "j", "b", "<", "s", "u", "R",
-                             "v", "(", ";", "-", "k", "C", "a", "Y",
-                             "O", "'", "=", "y", "U", "p", "_", ")"};
-const int symbolArraySize = sizeof(symbolArray) / sizeof(symbolArray[0]);
-const uint8_t *symbolsAPRS[] = {runnerSymbol,     carSymbol,
-                                jeepSymbol,       bikeSymbol,
-                                motorcycleSymbol, shipSymbol,
-                                truck18Symbol,    recreationalVehicleSymbol,
-                                vanSymbol,        carsateliteSymbol,
-                                tentSymbol,       houseSymbol,
-                                truckSymbol,      canoeSymbol,
-                                ambulanceSymbol,  yatchSymbol,
-                                baloonSymbol,     aircraftSymbol,
-                                trainSymbol,      yagiSymbol,
-                                busSymbol,        dogSymbol,
-                                wxSymbol,         wheelchairSymbol};
-
-// Expose variables defined in this file to UIMapManager namespace
+// Expose variables defined in shared_symbols.cpp to UIMapManager namespace
 namespace UIMapManager {
 // Definitions for externs in ui_map_manager.h
 const char *const *symbolArray = ::symbolArray;
@@ -97,26 +86,11 @@ extern uint8_t screenBrightness;
 extern int mapStationsCount; // Station counter for the map
                              // information bar
 
-// Display dimensions
-#define SCREEN_WIDTH 320
-#define SCREEN_HEIGHT 240
-
 // LVGL buffer size (use partial buffer to save memory, full buffer in PSRAM)
-#define LVGL_BUF_SIZE (SCREEN_WIDTH * SCREEN_HEIGHT)
+#define LVGL_BUF_SIZE (UI_SCREEN_WIDTH * UI_SCREEN_HEIGHT)
 
 
-// External touch module address (found by I2C scan in utils.cpp)
-extern uint8_t touchModuleAddress;
-
-// Touch controller - static instance, initialized in setup()
-static TouchLib touch(Wire, BOARD_I2C_SDA, BOARD_I2C_SCL, 0x00);
-static bool touchInitialized = false;
-
-// Touch calibration (same as touch_utils.cpp)
-static const int16_t xCalibratedMin = 5;
-static const int16_t xCalibratedMax = 314;
-static const int16_t yCalibratedMin = 6;
-static const int16_t yCalibratedMax = 233;
+// Touch is read via tft.getTouch() — LovyanGFX handles GT911 natively
 
 // LVGL display buffer (in PSRAM)
 static lv_disp_draw_buf_t draw_buf;
@@ -164,12 +138,8 @@ static void disp_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area,
 // Touch read callback
 static uint32_t lastTouchDebug = 0;
 static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
-  if (touchInitialized && touch.read()) {
-    TP_Point t = touch.getPoint(0);
-    // X and Y are swapped and Y is inverted because TFT screen is rotated
-    uint16_t x = map(t.y, xCalibratedMin, xCalibratedMax, 0, SCREEN_WIDTH);
-    uint16_t y = SCREEN_HEIGHT -
-                 map(t.x, yCalibratedMin, yCalibratedMax, 0, SCREEN_HEIGHT);
+  uint16_t x, y;
+  if (tft.getTouch(&x, &y)) {
     data->state = LV_INDEV_STATE_PR;
     data->point.x = x;
     data->point.y = y;
@@ -177,30 +147,25 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     // Reset activity timer on touch
     lastActivityTime = millis();
 
-    // Wake up screen if dimmed
     // Always reassert backlight on touch — guards against LEDC channel loss
     // (GPIO 42 shared between LovyanGFX Light_PWM and Arduino analogWrite)
     displaySetBrightness(screenBrightness);
-    
+
     if (screenDimmed) {
       screenDimmed = false;
-
-      // Boost CPU to 240 MHz if on map screen
       if (lv_scr_act() == MapState::screen_map) {
         setCpuFrequencyMhz(240);
         ESP_LOGI(TAG, "Screen woken up, CPU boosted to %d MHz (map)",
                       getCpuFrequencyMhz());
-        // Force immediate map redraw centered on current GPS position
         UIMapManager::redraw_map_canvas();
       } else {
         ESP_LOGI(TAG, "Screen woken up by touch");
       }
-      SD_Logger::logScreenState(false); // Log screen active
+      SD_Logger::logScreenState(false);
     }
 
-    // Debug: print touch coordinates
     if (millis() - lastTouchDebug > 500) {
-      ESP_LOGD(TAG, "Touch x=%d y=%d (raw: %d,%d)", x, y, t.x, t.y);
+      ESP_LOGD(TAG, "Touch x=%d y=%d", x, y);
       lastTouchDebug = millis();
     }
   } else {
@@ -271,7 +236,11 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
 
     // Init TFT
     tft.init();
-    tft.setRotation(1);
+#if defined(CROWPANEL_ADVANCE_35)
+    tft.setRotation(3); // Landscape 180°
+#else
+    tft.setRotation(1); // Standard landscape
+#endif
     tft.fillScreen(TFT_BLACK); // Clear to black before showing anything
 
 // Now turn on backlight with saved brightness
@@ -293,8 +262,8 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
       if (buf1) {
         lv_disp_draw_buf_init(&draw_buf, buf1, buf2, LVGL_BUF_SIZE);
         lv_disp_drv_init(&disp_drv);
-        disp_drv.hor_res = SCREEN_WIDTH;
-        disp_drv.ver_res = SCREEN_HEIGHT;
+        disp_drv.hor_res = UI_SCREEN_WIDTH;
+        disp_drv.ver_res = UI_SCREEN_HEIGHT;
         disp_drv.flush_cb = disp_flush_cb;
         disp_drv.draw_buf = &draw_buf;
         disp_drv.full_refresh = (buf2 != nullptr) ? 1 : 0;
@@ -336,7 +305,12 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
 #else
     lv_img_set_src(logo, &lora_aprs_logo);
 #endif
+#if defined(CROWPANEL_ADVANCE_35)
+    lv_img_set_zoom(logo, 384); // 256 is 1x, 384 is 1.5x
+    lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 50);
+#else
     lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 30);
+#endif
 
     // Subtitle: (TRACKER)
     lv_obj_t *subtitle = lv_label_create(screen_splash);
@@ -344,7 +318,11 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
     lv_obj_set_style_text_color(subtitle, lv_color_hex(0x0066cc),
                                 0); // Blue to match logo
     lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_18, 0);
+#if defined(CROWPANEL_ADVANCE_35)
+    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 160);
+#else
     lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 115);
+#endif
 
     // LoRa Frequency
     const char *region;
@@ -371,7 +349,11 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
     lv_label_set_text(freq_label, freqBuf);
     lv_obj_set_style_text_color(freq_label, lv_color_hex(0x0033cc),
                                 0); // Blue to match LoRa logo
+#if defined(CROWPANEL_ADVANCE_35)
+    lv_obj_align(freq_label, LV_ALIGN_CENTER, 0, 70);
+#else
     lv_obj_align(freq_label, LV_ALIGN_CENTER, 0, 40);
+#endif
 
     // Original author and version
     char verBuf[48];
@@ -380,7 +362,11 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
     lv_label_set_text(ver_label, verBuf);
     lv_obj_set_style_text_color(ver_label, lv_color_hex(0xcc0000),
                                 0); // Red to match APRS logo
+#if defined(CROWPANEL_ADVANCE_35)
+    lv_obj_align(ver_label, LV_ALIGN_BOTTOM_MID, 0, -60);
+#else
     lv_obj_align(ver_label, LV_ALIGN_BOTTOM_MID, 0, -50);
+#endif
 
     // UI fork credit
     lv_obj_t *ui_label = lv_label_create(screen_splash);
@@ -412,7 +398,11 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
     lv_obj_set_style_text_color(init_status_label, lv_color_hex(0x0066cc),
                                 0); // Blue to match logo
     lv_obj_set_style_text_font(init_status_label, &lv_font_montserrat_14, 0);
+#if defined(CROWPANEL_ADVANCE_35)
+    lv_obj_align(init_status_label, LV_ALIGN_BOTTOM_MID, 0, -15);
+#else
     lv_obj_align(init_status_label, LV_ALIGN_BOTTOM_MID, 0, -10);
+#endif
 
     lv_refr_now(NULL);
   }
@@ -448,6 +438,7 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
     STATION_Utils::loadIndex(2); // Screen Brightness value
     STATION_Utils::loadIndex(3); // Display Eco Mode
     STATION_Utils::loadIndex(4); // ECO Timeout value
+    STATION_Utils::loadIndex(5); // Sound Volume
     // Ensure brightness is within valid range for slider
     if (screenBrightness < BRIGHT_MIN)
       screenBrightness = BRIGHT_MIN;
@@ -462,7 +453,11 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
 
       // Re-init TFT for LVGL
       tft.init();
+#if defined(CROWPANEL_ADVANCE_35)
+      tft.setRotation(3); // Landscape 180°
+#else
       tft.setRotation(1); // Landscape, keyboard at bottom
+#endif
 
       // Initialize LVGL
       lv_init();
@@ -488,8 +483,8 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
 
       // Initialize display driver
       lv_disp_drv_init(&disp_drv);
-      disp_drv.hor_res = SCREEN_WIDTH;
-      disp_drv.ver_res = SCREEN_HEIGHT;
+      disp_drv.hor_res = UI_SCREEN_WIDTH;
+      disp_drv.ver_res = UI_SCREEN_HEIGHT;
       disp_drv.flush_cb = disp_flush_cb;
       disp_drv.draw_buf = &draw_buf;
       disp_drv.full_refresh =
@@ -500,29 +495,12 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
       ESP_LOGD(TAG, "Display already initialized by splash screen");
     }
 
-    // Initialize touch input
-    if (touchModuleAddress != 0x00) {
-      ESP_LOGI(TAG, "Touch module found at 0x%02X",
-                    touchModuleAddress);
-      if (touchModuleAddress == 0x14) {
-        touch =
-            TouchLib(Wire, BOARD_I2C_SDA, BOARD_I2C_SCL, GT911_SLAVE_ADDRESS2);
-      } else if (touchModuleAddress == 0x5D) {
-        touch =
-            TouchLib(Wire, BOARD_I2C_SDA, BOARD_I2C_SCL, GT911_SLAVE_ADDRESS1);
-      }
-      touch.init();
-      touchInitialized = true;
-
-      // Register LVGL input device
-      lv_indev_drv_init(&indev_drv);
-      indev_drv.type = LV_INDEV_TYPE_POINTER;
-      indev_drv.read_cb = touch_read_cb;
-      lv_indev_drv_register(&indev_drv);
-      ESP_LOGI(TAG, "Touch input registered");
-    } else {
-      ESP_LOGW(TAG, "No touch module detected");
-    }
+    // Initialize touch input (GT911 managed natively by LovyanGFX)
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.read_cb = touch_read_cb;
+    lv_indev_drv_register(&indev_drv);
+    ESP_LOGI(TAG, "Touch input registered (LGFX native GT911)");
 
     // Create the UI (dashboard module)
     UIDashboard::createDashboard();
@@ -628,7 +606,7 @@ void LVGL_UI::open_compose_with_callsign(const String &callsign) {
       // Update battery
       if (batteryVoltage.length() > 0) {
         float voltage = batteryVoltage.toFloat();
-        int percent = BATTERY_Utils::voltageToPercent(voltage);
+        int percent = BATTERY_Utils::getPercentVoltageBattery(voltage).toInt();
         UIDashboard::updateBattery(percent, voltage);
       }
 

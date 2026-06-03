@@ -45,8 +45,14 @@ public:
     // Update filtered position from GPS data (includes all filtering logic)
     void updateFilteredOwnPosition(const gps_fix& fix);
 
-    // Add current position to trace history (distance-based recording)
-    void addOwnTracePoint();
+    // Force filtered position to (lat, lon) bypassing spike/jitter/teleport rejection.
+    // Used on map re-entry after off-map period: the filter is frozen while off-map,
+    // so a long gap + km of movement would be rejected as "teleport" forever.
+    void forcePosition(double lat, double lon);
+
+    // Add current position to trace history (SmartBeacon-like criteria)
+    // Returns true if a point was actually recorded
+    bool addOwnTracePoint(const gps_fix& fix);
 
     // Get best available position for UI (Single Source of Truth)
     bool getUiPosition(double* lat, double* lon) const;
@@ -72,8 +78,7 @@ public:
     static constexpr int OWN_TRACE_MAX_POINTS = 500;
 
 private:
-    // Compact trace using Douglas-Peucker when buffer is full
-    void compactTrace();
+    // When buffer full: drop oldest point (simple ring buffer, no recursion)
 
     // Mutex for cross-core access (defense in depth)
     mutable SemaphoreHandle_t _mutex;
@@ -96,10 +101,21 @@ private:
     uint16_t ownTraceCount;
     uint16_t ownTraceHead;
 
-    // Constants
+    // SmartBeacon trace state
+    float lastTraceHeading;     // Heading at last recorded trace point
+    uint32_t lastTraceTime;     // millis() of last recorded trace point
+    float lastTraceLat;         // Position of last recorded trace point
+    float lastTraceLon;
+
+    // Constants — position filter
     static constexpr double MAX_SPEED_KMPH = 150.0;  // Spike rejection
     static constexpr double MIN_SPEED_KMPH = 3.0;    // Jitter filter (walking Doppler noise)
-    static constexpr float TRACE_MIN_DISTANCE = 0.000027f; // ~3 meters
+
+    // Constants — trace recording (SmartBeacon-like)
+    static constexpr float TRACE_HEADING_DELTA = 11.0f;  // degrees — record on direction change
+    static constexpr float TRACE_MIN_DIST_M    = 5.0f;   // meters — anti-jitter
+    static constexpr float TRACE_MAX_DIST_M    = 200.0f;  // meters — max gap on straight lines
+    static constexpr uint32_t TRACE_MIN_TIME_MS = 1500;   // 1.5s between points minimum
 };
 
 #endif // MAP_GPS_FILTER_H

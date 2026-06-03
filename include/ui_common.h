@@ -13,15 +13,20 @@
 // Version Info
 // =============================================================================
 
-#define UI_VERSION "2.9.1"
-#define UI_VERSION_DATE "2026-03-30"
+#define UI_VERSION "2.9.3"
+#define UI_VERSION_DATE "2026-04-30"
 
 // =============================================================================
 // Display Constants
 // =============================================================================
 
+#if defined(CROWPANEL_ADVANCE_35)
+#define UI_SCREEN_WIDTH 480
+#define UI_SCREEN_HEIGHT 320
+#else
 #define UI_SCREEN_WIDTH 320
 #define UI_SCREEN_HEIGHT 240
+#endif
 
 // =============================================================================
 // Color Constants (APRS-inspired palette)

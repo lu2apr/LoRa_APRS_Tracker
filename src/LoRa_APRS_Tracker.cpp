@@ -79,6 +79,7 @@ static const char *TAG = "Main";
 #endif
 #ifdef USE_LVGL_UI
 #include "lvgl_ui.h"
+#include "trace_sd.h"
 #endif
 
 
@@ -158,11 +159,21 @@ void setup() {
         digitalWrite(BOARD_BL_PIN, LOW);
     #endif
 
+    // CrowPanel: IO2 is shared between TFT RST and LoRa RST.
+    // Reset SX1262 NOW (before TFT init) so RadioLib doesn't need to pulse IO2 later.
+    #if defined(CROWPANEL_ADVANCE_35)
+        pinMode(RADIO_RST_PIN, OUTPUT);
+        digitalWrite(RADIO_RST_PIN, LOW);
+        delay(10);
+        digitalWrite(RADIO_RST_PIN, HIGH);
+        delay(20);
+        ESP_LOGI(TAG, "SX1262 pre-reset done on IO%d", RADIO_RST_PIN);
+    #endif
+
     POWER_Utils::setup();
     #ifndef USE_LVGL_UI
         displaySetup();  // Skip for LVGL - it does its own TFT init
     #endif
-    POWER_Utils::externalPinSetup();
 
     STATION_Utils::loadIndex(0);    // callsign Index
     STATION_Utils::loadIndex(1);    // lora freq settins Index
@@ -175,12 +186,13 @@ void setup() {
         startupScreen(loraIndex, versionDate);
     #endif
 
-    // Storage + Config first: SPIFFS must be ready before WiFi/BLE read Config
+    // Storage + Config after TFT init: SD uses the same SPI bus as display
     #ifdef USE_LVGL_UI
         LVGL_UI::updateInitStatus("Storage...");
     #endif
     STORAGE_Utils::setup();        // Formats SPIFFS on first boot
     Config.init();                 // Now SPIFFS is ready, load or create config
+    POWER_Utils::externalPinSetup();  // After Config.init — needs valid GPIO pins
     STORAGE_Utils::loadStats();
 
     // WiFi/BLE: no auto-start at boot — manual activation only via Settings
@@ -193,6 +205,12 @@ void setup() {
     SD_Logger::logBootInfo();
 
     #ifdef USE_LVGL_UI
+        // Trace persistence: open dir + guard. Session clear is deferred until
+        // GPS has a valid date (see trace_sd.cpp appendPoint).
+        TraceSD::init();
+    #endif
+
+    #ifdef USE_LVGL_UI
         LVGL_UI::updateInitStatus("GPS...");
     #endif
     GPS_Utils::setup();
@@ -202,7 +220,21 @@ void setup() {
     #endif
     currentLoRaType = &Config.loraTypes[loraIndex];
     LoRa_Utils::setup();
-    Utils::i2cScannerForPeripherals();
+    // CrowPanel: ensure IO2 (shared TFT RST / LoRa NRESET) stays HIGH after LoRa init
+    #if defined(CROWPANEL_ADVANCE_35)
+        pinMode(RADIO_RST_PIN, OUTPUT);
+        digitalWrite(RADIO_RST_PIN, HIGH);
+        ESP_LOGD(TAG, "IO2 forced HIGH after LoRa init");
+    #endif
+    #ifdef USE_LVGL_UI
+        LVGL_UI::updateInitStatus("I2C scan...");
+    #endif
+    #if !defined(CROWPANEL_ADVANCE_35)
+    Utils::i2cScannerForPeripherals();  // GT911 on CrowPanel crashes on I2C scan
+    #endif
+    #ifdef USE_LVGL_UI
+        LVGL_UI::updateInitStatus("WX...");
+    #endif
     WX_Utils::setup();
 
     #ifdef BUTTON_PIN
@@ -210,6 +242,9 @@ void setup() {
     #endif
     #ifdef HAS_JOYSTICK
         JOYSTICK_Utils::setup();
+    #endif
+    #ifdef USE_LVGL_UI
+        LVGL_UI::updateInitStatus("Keyboard...");
     #endif
     KEYBOARD_Utils::setup();
     #ifdef HAS_TOUCHSCREEN
@@ -228,6 +263,8 @@ void setup() {
             LVGL_UI::showBootWebConfig();  // Blocking - never returns, reboots after config
         }
     #endif
+
+    BATTERY_Utils::initBatteryGauge();
 
     ESP_LOGD(TAG, "Smart Beacon is: %s", Utils::getSmartBeaconState());
 
@@ -288,6 +325,15 @@ void loop() {
 
     // Process pending LoRa configuration changes (from ISR)
     LoRa_Utils::processPendingChanges();
+
+    {
+        static bool busyLogged = false;
+        int b = digitalRead(RADIO_BUSY_PIN);
+        if (b == 1 && !busyLogged) {
+            ESP_LOGW(TAG, "BUSY went HIGH at %lu ms, RST(IO2)=%d", millis(), digitalRead(RADIO_RST_PIN));
+            busyLogged = true;
+        }
+    }
 
     ReceivedLoRaPacket packet = LoRa_Utils::receivePacket();
 

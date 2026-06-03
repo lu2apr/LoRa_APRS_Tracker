@@ -23,6 +23,7 @@
 #include "station_utils.h"
 #include "configuration.h"
 #include "ui_map_manager.h"  // For MAP_TILE_SIZE, MAP_SPRITE_SIZE, MAP_MARGIN_X/Y, MAP_STATIONS_MAX, SYMBOL_SIZE, mapStationsCount
+#include "trace_sd.h"
 
 using namespace MapState;
 
@@ -376,54 +377,110 @@ namespace MapRender {
         }
     }
 
+    // Max points for combined SD + RAM trace rendering
+    static constexpr int TRACE_RENDER_MAX = 1024;
+    static lv_point_t trace_points[TRACE_RENDER_MAX];
+
     void draw_own_trace() {
         if (!map_canvas || !map_canvas_buf) return;
-        if (gpsFilter.getOwnTraceCount() < 2) return;
 
-        const TracePoint* trace = gpsFilter.getOwnTrace();
-        int traceHead  = gpsFilter.getOwnTraceHead();
-        int traceCount = gpsFilter.getOwnTraceCount();
-
+        // Pixel skip threshold based on zoom (avoid overdraw)
         int minPixDist2 = 0;
         if (map_current_zoom <= 10)      minPixDist2 = 144;
         else if (map_current_zoom <= 12) minPixDist2 = 36;
         else if (map_current_zoom <= 14) minPixDist2 = 9;
 
-        static lv_point_t trace_points[MapGPSFilter::OWN_TRACE_MAX_POINTS + 1];
-        int startIdx = (traceHead - traceCount + MapGPSFilter::OWN_TRACE_MAX_POINTS) % MapGPSFilter::OWN_TRACE_MAX_POINTS;
         int validPts = 0;
         int lastX = INT_MIN, lastY = INT_MIN;
 
-        for (int i = 0; i < traceCount; ++i) {
-            int currentIdx = (startIdx + i) % MapGPSFilter::OWN_TRACE_MAX_POINTS;
+        // Helper lambda: project + pixel-skip + append
+        auto addPixelPoint = [&](float lat, float lon) {
+            if (validPts >= TRACE_RENDER_MAX - 1) return;  // Reserve 1 for current pos
             int x, y;
-            MapMath::latLonToPixel(trace[currentIdx].lat, trace[currentIdx].lon,
-                          map_center_lat, map_center_lon, map_current_zoom, navModeActive, centerTileX, centerTileY, &x, &y);
-            if (minPixDist2 > 0 && validPts > 0 && i < traceCount - 1) {
+            MapMath::latLonToPixel(lat, lon,
+                          map_center_lat, map_center_lon, map_current_zoom,
+                          navModeActive, centerTileX, centerTileY, &x, &y);
+            if (minPixDist2 > 0 && validPts > 0) {
                 int dx = x - lastX, dy = y - lastY;
-                if (dx * dx + dy * dy < minPixDist2) continue;
+                if (dx * dx + dy * dy < minPixDist2) return;
             }
             trace_points[validPts++] = { (lv_coord_t)x, (lv_coord_t)y };
             lastX = x;
             lastY = y;
+        };
+
+        // 1. SD points — viewport bounding box
+        float cornerLat, cornerLon;
+        float minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+        // Compute viewport bounds from sprite corners
+        int corners[4][2] = { {0,0}, {MAP_SPRITE_SIZE,0}, {0,MAP_SPRITE_SIZE}, {MAP_SPRITE_SIZE,MAP_SPRITE_SIZE} };
+        for (auto& c : corners) {
+            MapMath::pixelToLatLon(c[0], c[1], map_current_zoom, navModeActive,
+                          centerTileX, centerTileY,
+                          map_center_lat, map_center_lon,
+                          &cornerLat, &cornerLon);
+            if (cornerLat < minLat) minLat = cornerLat;
+            if (cornerLat > maxLat) maxLat = cornerLat;
+            if (cornerLon < minLon) minLon = cornerLon;
+            if (cornerLon > maxLon) maxLon = cornerLon;
         }
 
+        // Draw helper
+        auto drawCurrentSegment = [&]() {
+            if (validPts >= 2) {
+                lv_draw_line_dsc_t line_dsc;
+                lv_draw_line_dsc_init(&line_dsc);
+                line_dsc.color = lv_color_hex(0x9933FF);
+                line_dsc.width = 2;
+                line_dsc.opa   = LV_OPA_COVER;
+                lv_canvas_draw_line(map_canvas, trace_points, validPts, &line_dsc);
+            }
+            validPts = 0;
+            lastX = INT_MIN;
+            lastY = INT_MIN;
+        };
+
+        // 1. SD points
+        static TraceRecord sdBuf[512];
+        static int sdIndices[512];
+        int sdCount = TraceSD::readViewport(minLat, maxLat, minLon, maxLon, sdBuf, 512, sdIndices);
+        
+        // Break the polyline when consecutive points are separated by a long
+        // time gap (off-map period with no trace recording): prevents a
+        // straight line artifact across the map between pre-exit and post-return
+        // trace segments. 2 minutes is well above normal GPS cadence.
+        static constexpr uint32_t TRACE_TIME_BREAK_MS = 2 * 60 * 1000;
+        uint32_t lastPointTimeMs = 0;
+
+        for (int i = 0; i < sdCount; ++i) {
+            // Break on topological skip (viewport-filtered gap) OR temporal gap
+            bool topoBreak = (i > 0 && sdIndices[i] != sdIndices[i - 1] + 1);
+            bool timeBreak = (i > 0 &&
+                              sdBuf[i].time_ms - sdBuf[i - 1].time_ms > TRACE_TIME_BREAK_MS);
+            if (topoBreak || timeBreak) {
+                drawCurrentSegment();
+            }
+            addPixelPoint(sdBuf[i].lat, sdBuf[i].lon);
+            lastPointTimeMs = sdBuf[i].time_ms;
+        }
+
+        // 2. Current position (tip of the trace)
         double uiLat, uiLon;
-        if (gpsFilter.getUiPosition(&uiLat, &uiLon)) {
+        if (gpsFilter.getUiPosition(&uiLat, &uiLon) && validPts < TRACE_RENDER_MAX) {
+            // Break if current position is temporally far from last SD point
+            // (e.g., map just reopened after a long off-map period).
+            if (sdCount > 0 && millis() - lastPointTimeMs > TRACE_TIME_BREAK_MS) {
+                drawCurrentSegment();
+            }
             int cx, cy;
             MapMath::latLonToPixel(uiLat, uiLon,
-                          map_center_lat, map_center_lon, map_current_zoom, navModeActive, centerTileX, centerTileY, &cx, &cy);
+                          map_center_lat, map_center_lon, map_current_zoom,
+                          navModeActive, centerTileX, centerTileY, &cx, &cy);
             trace_points[validPts++] = { (lv_coord_t)cx, (lv_coord_t)cy };
         }
 
-        lv_draw_line_dsc_t line_dsc;
-        lv_draw_line_dsc_init(&line_dsc);
-        line_dsc.color = lv_color_hex(0x9933FF);
-        line_dsc.width = 2;
-        line_dsc.opa   = LV_OPA_COVER;
-
-        if (validPts >= 2)
-            lv_canvas_draw_line(map_canvas, trace_points, validPts, &line_dsc);
+        // Draw final segment
+        drawCurrentSegment();
     }
 
 } // namespace MapRender

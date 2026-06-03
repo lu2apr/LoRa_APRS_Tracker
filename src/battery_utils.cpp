@@ -23,6 +23,12 @@
 #include "power_utils.h"
 #include "display.h"
 
+#ifdef HAS_FUEL_GAUGE_I2C
+    #include <Wire.h>
+    #include "Adafruit_MAX1704X.h"
+    static Adafruit_MAX17048 fuelGauge;
+    static bool fuelGaugeReady = false;
+#endif
 
 #ifdef ADC_CTRL
     uint32_t    adcCtrlTime         = 0;
@@ -77,6 +83,17 @@ namespace BATTERY_Utils {
     }
 
     String getPercentVoltageBattery(float voltage) {
+        #ifdef HAS_FUEL_GAUGE_I2C
+            if (fuelGaugeReady) {
+                float soc = fuelGauge.cellPercent();
+                if (!isnan(soc) && soc > 0.0f) {
+                    int percent = (int)(soc + 0.5f);
+                    if (percent > 100) percent = 100;
+                    if (percent < 0)   percent = 0;
+                    return (percent < 100) ? (((percent < 10) ? "  ": " ") + String(percent)) : "100";
+                }
+            }
+        #endif
         int percent = voltageToPercent(voltage);
         return (percent < 100) ? (((percent < 10) ? "  ": " ") + String(percent)) : "100";
     }
@@ -85,11 +102,37 @@ namespace BATTERY_Utils {
         return batteryVoltage;
     }
 
+    void initBatteryGauge() {
+        #ifdef HAS_FUEL_GAUGE_I2C
+            Wire.begin(FUEL_GAUGE_I2C_SDA, FUEL_GAUGE_I2C_SCL);
+            delay(5);  // let I2C bus settle (shared with GT911 touch via lgfx)
+            fuelGaugeReady = fuelGauge.begin(&Wire);
+            if (fuelGaugeReady) {
+                float v = fuelGauge.cellVoltage();
+                if (v == 0.0f || isnan(v)) {
+                    delay(50);  // retry after touch scan window
+                    v = fuelGauge.cellVoltage();
+                }
+                Serial.printf("[BATT] MAX17048 OK - cell=%.3fV SOC=%.1f%%\n",
+                              v, fuelGauge.cellPercent());
+            } else {
+                Serial.println("[BATT] MAX17048 not found, battery monitoring disabled");
+            }
+        #endif
+    }
+
     float readBatteryVoltage() {
+        #ifdef HAS_FUEL_GAUGE_I2C
+            if (fuelGaugeReady) return fuelGauge.cellVoltage();
+            return 0.0;
+        #endif
         #if defined(HAS_AXP192) || defined(HAS_AXP2101)
             return (PMU.getBattVoltage() / 1000.0);
         #else
             #ifdef BATTERY_PIN
+                #if BATTERY_PIN == -1
+                return 0.0;
+                #endif
                 int sampleSum = 0;
                 analogRead(BATTERY_PIN);    // Dummy Read
                 delay(1);
@@ -103,6 +146,9 @@ namespace BATTERY_Utils {
                 #ifdef LIGHTTRACKER_PLUS_1_0
                     double inputDivider = (1.0 / (560.0 + 100.0)) * 100.0;  // The voltage divider is a 560k + 100k resistor in series, 100k on the low side.
                     return ((voltage / inputDivider) * 1.11029) + 0.14431;
+                #endif
+                #if defined(CROWPANEL_ADVANCE_35)
+                    return (2 * (voltage + 0.1)); // Adjust this multiplier for CrowPanel if needed
                 #endif
                 #if defined(TTGO_T_Beam_V0_7) || defined(TTGO_T_LORA32_V2_1_GPS) || defined(TTGO_T_LORA32_V2_1_GPS_915) || defined(TTGO_T_LORA32_V2_1_TNC) || defined(TTGO_T_LORA32_V2_1_TNC_915) || defined(ESP32_DIY_LoRa_GPS) || defined(ESP32_DIY_LoRa_GPS_915) || defined(ESP32_DIY_1W_LoRa_GPS) || defined(ESP32_DIY_1W_LoRa_GPS_915) || defined(ESP32_DIY_1W_LoRa_GPS_LLCC68) || defined(OE5HWN_MeshCom) || defined(TTGO_T_DECK_GPS) || defined(TTGO_T_DECK_PLUS) || defined(ESP32S3_DIY_LoRa_GPS) || defined(ESP32S3_DIY_LoRa_GPS_915) || defined(TROY_LoRa_APRS) || defined(RPC_Electronics_1W_LoRa_GPS)
                     return (2 * (voltage + 0.1)) * (1 + (lora32BatReadingCorr/100)); // (2 x 100k voltage divider) 2 x voltage divider/+0.1 because ESP32 nonlinearity ~100mV ADC offset/extra correction
@@ -122,6 +168,16 @@ namespace BATTERY_Utils {
     }
 
     void obtainBatteryInfo() {
+        #ifdef HAS_FUEL_GAUGE_I2C
+            if (fuelGaugeReady) {
+                batteryVoltage   = String(fuelGauge.cellVoltage(), 2);
+                batteryConnected = (batteryVoltage.toFloat() > 1.5);
+            } else {
+                batteryVoltage   = "0.00";
+                batteryConnected = false;
+            }
+            return;
+        #endif
         #if defined(HAS_AXP192) || defined(HAS_AXP2101)
             batteryConnected = PMU.isBatteryConnect();
             if (batteryConnected) {
@@ -132,7 +188,7 @@ namespace BATTERY_Utils {
             batteryVoltage = String(readBatteryVoltage(), 2);
             if (batteryVoltage.toFloat() > 1.5) batteryConnected = true;
         #endif
-    }   
+    }
 
     void monitor() {
         #if defined(HAS_AXP192) || defined(HAS_AXP2101)
@@ -141,7 +197,7 @@ namespace BATTERY_Utils {
                 POWER_Utils::handleChargingLed();
                 batteryMeasurmentTime = millis();
             }
-        #elif defined(BATTERY_PIN)
+        #elif defined(BATTERY_PIN) || defined(HAS_FUEL_GAUGE_I2C)
             if (batteryMeasurmentTime == 0 || (millis() - batteryMeasurmentTime) > 30 * 1000){ //At least 30 seconds have to pass between measurements
                 #ifdef ADC_CTRL
                     switch(measuringState){

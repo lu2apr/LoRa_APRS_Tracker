@@ -10,7 +10,6 @@
 #include <lvgl.h>
 #include <Arduino.h>
 #include <NMEAGPS.h>
-#include "LGFX_TDeck.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include "map_state.h"
@@ -22,7 +21,13 @@ class Configuration;
 // External data sources from lvgl_ui.cpp and other global variables
 extern gps_fix gpsFix;
 extern Configuration Config;
-extern LGFX_TDeck tft;
+#if defined(CROWPANEL_ADVANCE_35)
+    #include "LGFX_CrowPanel_35.h"
+    extern LGFX_CrowPanel_35 tft;
+#else
+    #include "LGFX_TDeck.h"
+    extern LGFX_TDeck tft;
+#endif
 extern uint8_t myBeaconsIndex;
 extern int mapStationsCount;
 extern SemaphoreHandle_t spiMutex; // Declared extern for SPI bus mutex access
@@ -31,14 +36,19 @@ extern SemaphoreHandle_t spiMutex; // Declared extern for SPI bus mutex access
 #define MAP_TILE_SIZE 256
 #define MAP_TILES_GRID     3
 #define MAP_SPRITE_SIZE    (MAP_TILES_GRID * MAP_TILE_SIZE)  // 768 = 3×256
-#define MAP_VISIBLE_WIDTH 320  // Visible area on screen
-#define MAP_VISIBLE_HEIGHT 200
-#define MAP_MARGIN_X  ((MAP_SPRITE_SIZE - SCREEN_WIDTH) / 2)       // 224
-#define MAP_MARGIN_Y  ((MAP_SPRITE_SIZE - MAP_VISIBLE_HEIGHT) / 2) // 284
-
 // Dimensions de l'affichage
+#if defined(CROWPANEL_ADVANCE_35)
+#define SCREEN_WIDTH  480
+#define SCREEN_HEIGHT 320
+#else
 #define SCREEN_WIDTH  320
 #define SCREEN_HEIGHT 240
+#endif
+
+#define MAP_VISIBLE_WIDTH  SCREEN_WIDTH
+#define MAP_VISIBLE_HEIGHT (SCREEN_HEIGHT - 60)   // title_bar(35) + info_bar(25) = 60
+#define MAP_MARGIN_X  ((MAP_SPRITE_SIZE - SCREEN_WIDTH) / 2)
+#define MAP_MARGIN_Y  ((MAP_SPRITE_SIZE - MAP_VISIBLE_HEIGHT) / 2)
 
 namespace UIMapManager {
 
